@@ -1,10 +1,6 @@
 package com.olaph.xdm.ui
 
-import android.app.Activity
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -13,14 +9,20 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -64,13 +66,13 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SecondaryScrollableTabRow
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -104,7 +106,15 @@ import com.olaph.xdm.media.MediaFiles
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ListScreen(vm: MainViewModel, onOpenDetail: (Long) -> Unit, onOpenSettings: () -> Unit, onOpenPrivate: () -> Unit) {
+fun ListScreen(
+    vm: MainViewModel,
+    filter: Filter,
+    onFilterChange: (Filter) -> Unit,
+    snackbar: SnackbarHostState,
+    onOpenDetail: (Long) -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenPrivate: () -> Unit,
+) {
     val context = LocalContext.current
     val items by vm.items.collectAsStateWithLifecycle()
     val queue by vm.queueStatus.collectAsStateWithLifecycle()
@@ -116,11 +126,10 @@ fun ListScreen(vm: MainViewModel, onOpenDetail: (Long) -> Unit, onOpenSettings: 
         batteryExempt = BackgroundHelp.isExempt(context)
         onPauseOrDispose {}
     }
-    var filter by rememberSaveable { mutableStateOf(Filter.ALL) }
     var pendingDelete by remember { mutableStateOf<DownloadEntity?>(null) }
     var bulkDelete by remember { mutableStateOf<List<DownloadEntity>?>(null) }
     var overflow by remember { mutableStateOf(false) }
-    val snackbar = remember { SnackbarHostState() }
+    val listState = rememberLazyListState()
     val selected by vm.selected.collectAsStateWithLifecycle()
     val deleteProgress by vm.deleteProgress.collectAsStateWithLifecycle()
     val selecting = selected.isNotEmpty()
@@ -128,19 +137,6 @@ fun ListScreen(vm: MainViewModel, onOpenDetail: (Long) -> Unit, onOpenSettings: 
     val scoped = DeleteScope.inFilter(shown.orEmpty().map { it.entity }, filter)
 
     BackHandler(enabled = selecting) { vm.clearSelection() }
-
-    // Files the app may not delete itself (e.g. left over from a previous install): one system dialog for all.
-    val systemDelete = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
-        vm.onSystemDeleteResult(it.resultCode == Activity.RESULT_OK)
-    }
-    LaunchedEffect(vm) {
-        vm.events.collect { e ->
-            when (e) {
-                is MainViewModel.Event.Message -> snackbar.showSnackbar(e.text, duration = SnackbarDuration.Long)
-                is MainViewModel.Event.SystemDelete -> systemDelete.launch(IntentSenderRequest.Builder(e.request).build())
-            }
-        }
-    }
 
     LaunchedEffect(clipboardOffer) {
         val offer = clipboardOffer ?: return@LaunchedEffect
@@ -197,14 +193,25 @@ fun ListScreen(vm: MainViewModel, onOpenDetail: (Long) -> Unit, onOpenSettings: 
         },
         snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize()) {
-            TabRow(selectedTabIndex = filter.ordinal) {
+        Column(
+            Modifier
+                .padding(padding)
+                .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
+                .fillMaxSize(),
+        ) {
+            SecondaryScrollableTabRow(selectedTabIndex = filter.ordinal, edgePadding = 12.dp) {
                 Filter.entries.forEach { f ->
                     val count = items?.count { f.matches(it.entity.status) }
                     Tab(
                         selected = f == filter,
-                        onClick = { filter = f },
-                        text = { Text(if (count != null && count > 0) "${f.label} ($count)" else f.label) },
+                        onClick = { onFilterChange(f) },
+                        text = {
+                            Text(
+                                if (count != null && count > 0) "${f.label} ($count)" else f.label,
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        },
                     )
                 }
             }
@@ -241,6 +248,7 @@ fun ListScreen(vm: MainViewModel, onOpenDetail: (Long) -> Unit, onOpenSettings: 
                 shown == null -> Unit
                 shown.isEmpty() -> EmptyState(filter)
                 else -> LazyColumn(
+                    state = listState,
                     contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 96.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {

@@ -370,7 +370,7 @@ class TsMp4Remuxer : Remuxer {
             val f = t.format
             if (f == null || f.sampleMimeType != MimeTypes.AUDIO_AAC || f.sampleRate <= 0) return out
             val frameUs = 1_000_000.0 * 1024 / f.sampleRate
-            val jumped = t.gridLastRaw != C.TIME_UNSET && rawUs - t.gridLastRaw > 4 * frameUs
+            val jumped = t.gridLastRaw != C.TIME_UNSET && (rawUs - t.gridLastRaw > 4 * frameUs || rawUs < t.gridLastRaw)
             if (t.gridAnchor == C.TIME_UNSET || jumped) {
                 t.gridIdx = 0
                 t.gridAnchor = out

@@ -87,4 +87,18 @@ class CrossHostRedirectTest {
             assertEquals("Browser-UA", r.getHeader("User-Agent"))
         }
     }
+
+    @Test fun httpsOriginDowngradeToHttpDropsCookieViaInterceptor() {
+        val client = OkHttpClient().withScopedCookies()
+        val req = okhttp3.Request.Builder()
+            .url(cdn.url("/blob.bin"))
+            .header("Cookie", "sid=secret")
+            .header("Referer", "https://page.test/")
+            .tag(OriginHost::class.java, OriginHost("localhost", isHttps = true))
+            .build()
+        client.newCall(req).execute().use { assertEquals(200, it.code) }
+        val r = cdnRequests.single()
+        assertNull("cookie must be dropped on HTTPS->HTTP downgrade", r.getHeader("Cookie"))
+        assertEquals("https://page.test/", r.getHeader("Referer"))
+    }
 }

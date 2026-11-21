@@ -1,15 +1,18 @@
 package com.olaph.xdm.ui
 
 import android.Manifest
+import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
@@ -22,6 +25,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -29,7 +35,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -127,6 +135,22 @@ fun XdmRoot(vm: MainViewModel, browser: BrowserViewModel) {
         // Where detail/settings return to (they can be opened from either bottom tab).
         var backRoute by rememberSaveable { mutableStateOf(ROUTE_LIST) }
         var detailId by rememberSaveable { mutableLongStateOf(-1L) }
+        var filter by rememberSaveable { mutableStateOf(Filter.ALL) }
+        val snackbar = remember { SnackbarHostState() }
+        val stateHolder = rememberSaveableStateHolder()
+
+        // Files the app may not delete itself (e.g. left over from a previous install): one system dialog for all.
+        val systemDelete = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
+            vm.onSystemDeleteResult(it.resultCode == Activity.RESULT_OK)
+        }
+        LaunchedEffect(vm) {
+            vm.events.collect { e ->
+                when (e) {
+                    is MainViewModel.Event.Message -> snackbar.showSnackbar(e.text, duration = SnackbarDuration.Long)
+                    is MainViewModel.Event.SystemDelete -> systemDelete.launch(IntentSenderRequest.Builder(e.request).build())
+                }
+            }
+        }
 
         LaunchedEffect(openPrivate) {
             if (openPrivate) {
@@ -184,11 +208,11 @@ fun XdmRoot(vm: MainViewModel, browser: BrowserViewModel) {
         when (route) {
             ROUTE_DETAIL -> {
                 BackHandler { route = backRoute }
-                DetailScreen(vm, detailId, onBack = { route = backRoute })
+                DetailScreen(vm, detailId, snackbar = snackbar, onBack = { route = backRoute })
             }
             ROUTE_SETTINGS -> {
                 BackHandler { route = backRoute }
-                SettingsScreen(vm, onBack = { route = backRoute })
+                SettingsScreen(vm, snackbar = snackbar, onBack = { route = backRoute })
             }
             ROUTE_PRIVATE -> {
                 BackHandler { route = ROUTE_LIST }
@@ -200,6 +224,7 @@ fun XdmRoot(vm: MainViewModel, browser: BrowserViewModel) {
                 BackHandler(enabled = inBrowser) { if (!browser.handleBack()) route = ROUTE_LIST }
                 val showNav = !inBrowser || browser.page == BrowserPage.TAB
                 Scaffold(
+                    snackbarHost = { if (inBrowser) SnackbarHost(snackbar) },
                     bottomBar = {
                         if (showNav) {
                             NavigationBar {
@@ -221,14 +246,21 @@ fun XdmRoot(vm: MainViewModel, browser: BrowserViewModel) {
                 ) { padding ->
                     Box(Modifier.padding(padding).consumeWindowInsets(padding)) {
                         if (inBrowser) {
-                            BrowserScreen(browser, onOpenSettings = { backRoute = ROUTE_BROWSER; route = ROUTE_SETTINGS })
+                            stateHolder.SaveableStateProvider(ROUTE_BROWSER) {
+                                BrowserScreen(browser, onOpenSettings = { backRoute = ROUTE_BROWSER; route = ROUTE_SETTINGS })
+                            }
                         } else {
-                            ListScreen(
-                                vm,
-                                onOpenDetail = { detailId = it; backRoute = ROUTE_LIST; route = ROUTE_DETAIL },
-                                onOpenSettings = { backRoute = ROUTE_LIST; route = ROUTE_SETTINGS },
-                                onOpenPrivate = { route = ROUTE_PRIVATE },
-                            )
+                            stateHolder.SaveableStateProvider(ROUTE_LIST) {
+                                ListScreen(
+                                    vm,
+                                    filter = filter,
+                                    onFilterChange = { filter = it },
+                                    snackbar = snackbar,
+                                    onOpenDetail = { detailId = it; backRoute = ROUTE_LIST; route = ROUTE_DETAIL },
+                                    onOpenSettings = { backRoute = ROUTE_LIST; route = ROUTE_SETTINGS },
+                                    onOpenPrivate = { route = ROUTE_PRIVATE },
+                                )
+                            }
                         }
                     }
                 }

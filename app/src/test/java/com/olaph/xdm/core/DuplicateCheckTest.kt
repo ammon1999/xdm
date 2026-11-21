@@ -226,4 +226,34 @@ class DuplicateCheckTest {
         assertEquals("Completed · 1000 B", DuplicateCheck.describe(completed()))
         assertEquals("Failed", DuplicateCheck.describe(entity(status = DownloadStatus.FAILED, total = -1, done = 0)))
     }
+
+    @Test fun fileExistsIsNotCalledForNonMatchingCompletedRows() {
+        var existsCalls = 0
+        val countingCheck = DuplicateCheck(
+            fileExists = { existsCalls++; it in present },
+            folderFor = { planned },
+        )
+        val existing = (1..5).map { i ->
+            completed(name = "other-$i.zip", url = "https://other.test/$i.zip", total = 1000L + i)
+        }
+        assertNull(countingCheck.find(candidate(url = "https://cdn.test/fresh.iso", name = "fresh.iso", size = 9999), existing))
+        assertEquals(0, existsCalls)
+    }
+
+    @Test fun findAllMemoizesFileExistsAndFolderForAcrossBatch() {
+        var existsCalls = 0
+        var folderCalls = 0
+        val countingCheck = DuplicateCheck(
+            fileExists = { existsCalls++; it in present },
+            folderFor = { folderCalls++; planned },
+        )
+        val existing = listOf(completed(name = "shared.zip", url = "https://old.test/shared.zip", total = 5000))
+        val items = listOf("shared.zip", "shared.zip", "shared.zip", "shared.zip")
+        val batch = countingCheck.findAll(items, existing) {
+            DuplicateCandidate(url = "https://new.test/other-${System.identityHashCode(it)}", fileName = it, totalBytes = 5000)
+        }
+        assertEquals(4, batch.duplicates)
+        assertEquals(1, existsCalls)
+        assertEquals(1, folderCalls)
+    }
 }

@@ -105,7 +105,7 @@ class DownloadEngine(
         // Splitting needs ranges and a known end; a single connection has nobody to hand the other half to.
         val minSplit = if (probe.resumable && connections > 1) minSplitBytes else 0L
 
-        val validation = Validation()
+        val validation = Validation(interrupts.get())
         // Set once the server sends a whole file for a range request: no new splits after that, only finish what exists.
         val rangesFlaky = AtomicBoolean(false)
         val channel = RandomAccessFile(file, "rw").channel
@@ -229,12 +229,13 @@ class DownloadEngine(
             val interruptsBefore = interrupts.get()
             val used = urls.url
             try {
-                transferSegment(request, used, probe, table, seg, channel, skipAhead)
+                transferSegment(request, used, probe, table, seg, channel, rangesFlaky, skipAhead)
                 return
             } catch (e: CancellationException) {
                 throw e
             } catch (e: RangeIgnoredException) {
                 rangesFlaky.set(true)
+                unavailable = 0
                 refusals++
                 if (refusals <= maxRetries) {
                     delay(backoffMs(refusals))
@@ -254,7 +255,10 @@ class DownloadEngine(
                 )
             } catch (e: FatalDownloadException) {
                 // Signed URL expired: get a new one and carry on from the bytes already written.
-                if (e.isExpiredUrl() && urls.renew(used)) continue
+                if (e.isExpiredUrl() && urls.renew(used)) {
+                    unavailable = 0
+                    continue
+                }
                 throw e
             } catch (e: IOException) {
                 currentCoroutineContext().ensureActive() // an aborted call surfaces as IOException("Canceled")
@@ -282,9 +286,9 @@ class DownloadEngine(
     }
 
     /** Remembers for which interruption the file on the server was last compared with the one being downloaded. */
-    private class Validation {
+    private class Validation(initialEpoch: Int) {
         val mutex = Mutex()
-        @Volatile var epoch = 0
+        @Volatile var epoch = initialEpoch
     }
 
     /**
@@ -315,6 +319,7 @@ class DownloadEngine(
         table: SegmentTable,
         seg: SegmentTable.Live,
         channel: FileChannel,
+        rangesFlaky: AtomicBoolean,
         skipAhead: Boolean = false,
     ) {
         val offset = table.begin(seg)
@@ -339,6 +344,7 @@ class DownloadEngine(
                     if (probe.contentLength > 0 && length >= 0 && length != probe.contentLength) {
                         throw FatalDownloadException("Server ignored the Range header (HTTP ${r.code})", r.code)
                     }
+                    rangesFlaky.set(true)
                     if (offset != 0L && !skipAhead) throw RangeIgnoredException(r.code)
                     discard = offset
                 } else if (range != null) {

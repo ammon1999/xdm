@@ -10,6 +10,7 @@ import com.olaph.xdm.engine.MimeTypes
 import com.olaph.xdm.engine.buildRequest
 import com.olaph.xdm.engine.checkStatus
 import com.olaph.xdm.engine.executeAndUse
+import com.olaph.xdm.engine.withScopedCookies
 import kotlinx.coroutines.CancellationException
 import okhttp3.OkHttpClient
 import java.io.ByteArrayOutputStream
@@ -22,7 +23,7 @@ import java.util.concurrent.TimeUnit
  * for the page. Transient failures (timeouts, 5xx) are thrown as [IOException]; "not media" is [MediaAnalysis.Rejected].
  */
 class MediaProbe(client: OkHttpClient) {
-    private val http: OkHttpClient = client.newBuilder()
+    private val http: OkHttpClient = client.withScopedCookies().newBuilder()
         .callTimeout(20, TimeUnit.SECONDS)
         .build()
 

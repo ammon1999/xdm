@@ -252,4 +252,154 @@ class DownloadEngine503Test {
         }
     }
 
+    @Test fun offsetZero200OnRangedRequestStopsDynamicSplitting() = runBlocking {
+        val data = ByteArray(128 * 1024).also { Random(200).nextBytes(it) }
+        val gets = AtomicInteger()
+        val server = MockWebServer().apply {
+            dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    gets.incrementAndGet()
+                    val range = request.getHeader("Range") ?: ""
+                    if (range.startsWith("bytes=0-")) {
+                        return MockResponse()
+                            .setResponseCode(200)
+                            .setHeader("Content-Length", data.size)
+                            .setBody(Buffer().write(data))
+                    }
+                    Thread.sleep(150)
+                    val m = Regex("bytes=(\\d+)-(\\d+)").matchEntire(range)!!
+                    val start = m.groupValues[1].toInt()
+                    val end = m.groupValues[2].toInt()
+                    return MockResponse()
+                        .setResponseCode(206)
+                        .setHeader("Content-Range", "bytes $start-$end/${data.size}")
+                        .setBody(Buffer().write(data, start, end - start + 1))
+                }
+            }
+            start()
+        }
+        try {
+            val file = File(tmp.root, "flaky-offset0.part")
+            val store = DownloadEngineSplitTest.MemoryStore()
+            DownloadEngine(OkHttpClient(), maxRetries = 2, backoffMs = { 1 }, minSplitBytes = 1024).download(
+                EngineRequest(1, server.url("/fixture").toString(), "Test", file, 2, maxSegmentBytes = 64L * 1024, knownLength = data.size.toLong()),
+                store,
+            )
+            assertEquals("offset-0 HTTP 200 must set rangesFlaky and prevent dynamic splitting", 2, gets.get())
+            assertEquals(2, store.segments.size)
+            assertArrayEquals(data, file.readBytes())
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test fun validationStartsAtCurrentInterruptEpochWithoutSpuriousReprobe() = runBlocking {
+        val data = ByteArray(128 * 1024).also { Random(77).nextBytes(it) }
+        val heads = AtomicInteger()
+        val firstCancelled = AtomicBoolean()
+        val firstStarted = CountDownLatch(1)
+        val first = AtomicBoolean(true)
+        val client = OkHttpClient.Builder().eventListener(object : EventListener() {
+            override fun callFailed(call: Call, ioe: IOException) {
+                if (call.request().header("Range") == "bytes=0-65535") firstCancelled.set(true)
+            }
+        }).build()
+        val server = MockWebServer().apply {
+            dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    if (request.method == "HEAD") {
+                        heads.incrementAndGet()
+                        return MockResponse().setHeader("Content-Length", data.size).setHeader("Accept-Ranges", "bytes")
+                    }
+                    val m = Regex("bytes=(\\d+)-(\\d+)").matchEntire(request.getHeader("Range")!!)!!
+                    val start = m.groupValues[1].toInt()
+                    val end = m.groupValues[2].toInt()
+                    if (start == 0 && first.compareAndSet(true, false)) {
+                        firstStarted.countDown()
+                        return MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)
+                    }
+                    check(firstStarted.await(5, TimeUnit.SECONDS))
+                    if (!firstCancelled.get()) return MockResponse().setResponseCode(503)
+                    return MockResponse().setResponseCode(206)
+                        .setHeader("Content-Range", "bytes $start-$end/${data.size}")
+                        .setBody(Buffer().write(data, start, end - start + 1))
+                }
+            }
+            start()
+        }
+        try {
+            val engine = DownloadEngine(client, maxRetries = 2, backoffMs = { 1 }, minSplitBytes = 0)
+            engine.interruptConnections()
+            val file = File(tmp.root, "epoch.part")
+            engine.download(
+                EngineRequest(1, server.url("/fixture").toString(), "Test", file, 2, maxSegmentBytes = 64L * 1024, knownLength = data.size.toLong()),
+                DownloadEngineSplitTest.MemoryStore(),
+            )
+            assertEquals("prior interrupts on engine must not trigger spurious HEAD revalidation", 0, heads.get())
+            assertArrayEquals(data, file.readBytes())
+        } finally {
+            server.shutdown()
+            client.connectionPool.evictAll()
+        }
+    }
+
+    @Test fun unavailable503CounterResetsAfterUrlRenewal() = runBlocking {
+        val data = ByteArray(128 * 1024).also { Random(403).nextBytes(it) }
+        val seg1Gate = CountDownLatch(1)
+        val seg0Count = AtomicInteger()
+        val cancelled = AtomicInteger()
+        val client = OkHttpClient.Builder().eventListener(object : EventListener() {
+            override fun callFailed(call: Call, ioe: IOException) {
+                cancelled.incrementAndGet()
+            }
+        }).build()
+        val server = MockWebServer().apply {
+            dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    val m = Regex("bytes=(\\d+)-(\\d+)").matchEntire(request.getHeader("Range")!!)!!
+                    val start = m.groupValues[1].toInt()
+                    val end = m.groupValues[2].toInt()
+                    if (start == 0) {
+                        val step = seg0Count.incrementAndGet()
+                        when {
+                            request.path == "/v1" && step == 1 -> return MockResponse().setResponseCode(503)
+                            request.path == "/v1" -> return MockResponse().setResponseCode(403)
+                            request.path == "/v2" && step == 3 -> {
+                                seg1Gate.countDown()
+                                return MockResponse().setResponseCode(503)
+                            }
+                        }
+                    } else {
+                        check(seg1Gate.await(5, TimeUnit.SECONDS))
+                    }
+                    return MockResponse().setResponseCode(206)
+                        .setHeader("Content-Range", "bytes $start-$end/${data.size}")
+                        .setBody(Buffer().write(data, start, end - start + 1))
+                }
+            }
+            start()
+        }
+        try {
+            val file = File(tmp.root, "renew-reset.part")
+            DownloadEngine(client, maxRetries = 3, backoffMs = { 1 }, minSplitBytes = 0).download(
+                EngineRequest(
+                    id = 1,
+                    url = server.url("/v1").toString(),
+                    userAgent = "Test",
+                    file = file,
+                    connections = 2,
+                    maxSegmentBytes = 64L * 1024,
+                    knownLength = data.size.toLong(),
+                    refreshUrl = { server.url("/v2").toString() },
+                ),
+                DownloadEngineSplitTest.MemoryStore(),
+            )
+            assertEquals("resetting unavailable on URL renewal avoids cancelling sibling connections", 0, cancelled.get())
+            assertArrayEquals(data, file.readBytes())
+        } finally {
+            seg1Gate.countDown()
+            server.shutdown()
+            client.connectionPool.evictAll()
+        }
+    }
 }

@@ -38,10 +38,8 @@ class DownloadService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var collector: Job? = null
-
-    /** Ids with a notification this service posted, so they can be cleared when they leave the queue. */
-    private val shown = HashSet<Long>()
-    private val lastPosted = HashMap<Long, Long>()
+    private var startedForeground = false
+    private val notifications = NotificationThrottle()
 
     private val container get() = (application as XdmApp).container
 
@@ -50,20 +48,23 @@ class DownloadService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val c = container
         // Must happen within seconds of startForegroundService().
-        val first = c.notifications.summary(0, 0, 0, false)
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ServiceCompat.startForeground(this, NotificationHelper.SUMMARY_ID, first, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-            } else {
-                startForeground(NotificationHelper.SUMMARY_ID, first)
+        if (!startedForeground) {
+            val first = c.notifications.summary(0, 0, 0, false)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    ServiceCompat.startForeground(this, NotificationHelper.SUMMARY_ID, first, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                } else {
+                    startForeground(NotificationHelper.SUMMARY_ID, first)
+                }
+                startedForeground = true
+            } catch (e: Exception) {
+                // ForegroundServiceStartNotAllowedException (started from the background without an exemption, by a boot receiver
+                // on Android 15+, or with the dataSync time limit used up) or a missing permission. Nothing is lost: the downloads
+                // stay as they are and the user is told how to go on.
+                c.scope.launch { announceBlockedStart() }
+                stopSelf()
+                return START_NOT_STICKY
             }
-        } catch (e: Exception) {
-            // ForegroundServiceStartNotAllowedException (started from the background without an exemption, by a boot receiver
-            // on Android 15+, or with the dataSync time limit used up) or a missing permission. Nothing is lost: the downloads
-            // stay as they are and the user is told how to go on.
-            c.scope.launch { announceBlockedStart() }
-            stopSelf()
-            return START_NOT_STICKY
         }
         c.notifications.cancelAttention()
         c.releaseQueue()
@@ -108,6 +109,7 @@ class DownloadService : Service() {
             } catch (_: Throwable) {
                 // fall through to stopping
             } finally {
+                startedForeground = false
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf(startId)
             }
@@ -125,24 +127,26 @@ class DownloadService : Service() {
             val running = open.filter { it.status == DownloadStatus.RUNNING }
             val queued = open.count { it.status == DownloadStatus.QUEUED }
             val speed = running.sumOf { live[it.id]?.bytesPerSecond ?: 0L }
-            c.notifications.postSummary(c.notifications.summary(running.size, queued, speed, hold == Hold.WIFI, !online, limit))
-
             val now = System.currentTimeMillis()
+            val summaryKey = SummaryKey(running.size, queued, hold == Hold.WIFI, !online, limit)
+            if (notifications.shouldPostSummary(summaryKey, speed, now)) {
+                c.notifications.postSummary(c.notifications.summary(running.size, queued, speed, hold == Hold.WIFI, !online, limit))
+            }
+
             for (d in open) {
                 when (d.status) {
                     DownloadStatus.RUNNING, DownloadStatus.QUEUED -> {
-                        if (now - (lastPosted[d.id] ?: 0) < 800 && d.id in shown) continue
-                        c.notifications.progress(d, live[d.id]); shown += d.id; lastPosted[d.id] = now
+                        if (notifications.shouldPostActive(d.id, now)) c.notifications.progress(d, live[d.id])
                     }
-                    // Only keep a "paused" card for downloads that were visible as active.
-                    DownloadStatus.PAUSED -> if (d.id in shown) {
-                        c.notifications.progress(d, live[d.id]); lastPosted.remove(d.id)
+                    // Only keep a "paused" card once for downloads that were visible as active.
+                    DownloadStatus.PAUSED -> {
+                        if (notifications.shouldPostPaused(d.id)) c.notifications.progress(d, live[d.id])
                     }
                     else -> Unit
                 }
             }
             val openIds = open.map { it.id }.toSet()
-            shown.filter { it !in openIds }.forEach { c.notifications.cancel(it); shown -= it; lastPosted.remove(it) }
+            notifications.pruneClosed(openIds).forEach { c.notifications.cancel(it) }
 
             // Downloads that wait for the schedule or the charger need no service: it would only use up the system's time.
             val waitingForClock = hold == Hold.SCHEDULE || hold == Hold.CHARGING
@@ -150,6 +154,7 @@ class DownloadService : Service() {
             if (running.isEmpty() && (queued == 0 || waitingForClock) && !refreshing) {
                 // Debounce: a resume tapped on a notification arrives a moment after the service starts.
                 delay(STOP_GRACE_MS)
+                startedForeground = false
                 ServiceCompat.stopForeground(this@DownloadService, ServiceCompat.STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
@@ -192,5 +197,59 @@ class DownloadService : Service() {
         fun start(context: Context): Boolean = runCatching {
             ContextCompat.startForegroundService(context, Intent(context, DownloadService::class.java))
         }.isSuccess
+    }
+}
+
+internal data class SummaryKey(
+    val running: Int,
+    val queued: Int,
+    val holdWifi: Boolean,
+    val offline: Boolean,
+    val limit: Long,
+)
+
+internal class NotificationThrottle(
+    private val summaryIntervalMs: Long = 1_000L,
+    private val progressIntervalMs: Long = 800L,
+) {
+    private val shown = HashSet<Long>()
+    private val lastPosted = HashMap<Long, Long>()
+    private val pausedPosted = HashSet<Long>()
+    private var lastSummaryAt = 0L
+    private var lastSummaryKey: SummaryKey? = null
+    private var lastSummarySpeed = -1L
+
+    fun shouldPostSummary(key: SummaryKey, speed: Long, now: Long): Boolean {
+        val stateChanged = lastSummaryKey != key
+        val speedDue = speed != lastSummarySpeed && now - lastSummaryAt >= summaryIntervalMs
+        if (!stateChanged && !speedDue) return false
+        lastSummaryKey = key
+        lastSummarySpeed = speed
+        lastSummaryAt = now
+        return true
+    }
+
+    fun shouldPostActive(id: Long, now: Long): Boolean {
+        pausedPosted.remove(id)
+        if (id in shown && now - (lastPosted[id] ?: 0L) < progressIntervalMs) return false
+        shown += id
+        lastPosted[id] = now
+        return true
+    }
+
+    fun shouldPostPaused(id: Long): Boolean {
+        if (id !in shown || !pausedPosted.add(id)) return false
+        lastPosted.remove(id)
+        return true
+    }
+
+    fun pruneClosed(openIds: Set<Long>): List<Long> {
+        val closed = shown.filter { it !in openIds }
+        for (id in closed) {
+            shown.remove(id)
+            lastPosted.remove(id)
+            pausedPosted.remove(id)
+        }
+        return closed
     }
 }

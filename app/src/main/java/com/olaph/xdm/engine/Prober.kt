@@ -27,17 +27,20 @@ internal suspend fun <T> Call.executeAndUse(block: suspend (Response) -> T): T =
     }
 }
 
-/** Host the user's download URL points at; used to keep the Cookie header from leaking via redirects. */
-internal class OriginHost(val host: String)
+/** Origin host and scheme the download URL started at; keeps Cookie from leaking across hosts or HTTPS->HTTP downgrades. */
+internal class OriginHost(val host: String, val isHttps: Boolean)
 
 /**
  * Browsers only send a site's cookies to that site. The engine forwards the stored `Cookie` header, so a
- * redirect to a different host (CDN, signed URL) must not carry it along; other headers are unaffected.
+ * redirect to a different host (CDN, signed URL) or from HTTPS to plain HTTP must not carry it along;
+ * other headers are unaffected.
  */
 internal fun OkHttpClient.withScopedCookies(): OkHttpClient = newBuilder().addNetworkInterceptor { chain ->
     val req = chain.request()
     val origin = req.tag(OriginHost::class.java)
-    if (origin != null && req.header("Cookie") != null && !req.url.host.equals(origin.host, ignoreCase = true)) {
+    val crossHost = origin != null && !req.url.host.equals(origin.host, ignoreCase = true)
+    val schemeDowngrade = origin != null && origin.isHttps && !req.url.isHttps
+    if (origin != null && req.header("Cookie") != null && (crossHost || schemeDowngrade)) {
         chain.proceed(req.newBuilder().removeHeader("Cookie").build())
     } else {
         chain.proceed(req)
@@ -54,7 +57,7 @@ internal fun buildRequest(
     Request.Builder().url(url)
         .header("User-Agent", userAgent)
         .apply { HeaderCodec.sanitize(headers).forEach { (k, v) -> header(k, v) } } // may override the User-Agent
-        .apply { url.toHttpUrlOrNull()?.let { tag(OriginHost::class.java, OriginHost(it.host)) } }
+        .apply { url.toHttpUrlOrNull()?.let { tag(OriginHost::class.java, OriginHost(it.host, it.isHttps)) } }
         // Never let OkHttp transparently gzip: byte ranges must address the real file.
         .header("Accept-Encoding", "identity")
         .apply {

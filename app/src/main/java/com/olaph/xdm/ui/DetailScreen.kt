@@ -4,11 +4,16 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -21,6 +26,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -44,7 +51,7 @@ import com.olaph.xdm.data.SegmentEntity
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DetailScreen(vm: MainViewModel, id: Long, onBack: () -> Unit) {
+fun DetailScreen(vm: MainViewModel, id: Long, snackbar: SnackbarHostState, onBack: () -> Unit) {
     val items by vm.items.collectAsStateWithLifecycle()
     val queue by vm.queueStatus.collectAsStateWithLifecycle()
     val segmentsFlow = remember(id) { vm.segments(id) }
@@ -68,10 +75,12 @@ fun DetailScreen(vm: MainViewModel, id: Long, onBack: () -> Unit) {
                 actions = { RowActions(d, vm, onDelete = { confirmDelete = true }) },
             )
         },
+        snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
         Column(
             Modifier
                 .padding(padding)
+                .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp),

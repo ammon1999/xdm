@@ -345,4 +345,15 @@ class TsMp4RemuxerTest {
         val (_, mp4) = remux(fixture("audio.ts"), out)
         assertEquals(1, mp4.traks.size)
     }
+
+    @Test fun discontinuityReanchorsAudioGridToStayAlignedWithVideo() {
+        val (r, mp4) = remux(fixture("disc-a.ts", "disc-b.ts"))
+        assertEquals(1, r.discontinuities)
+        assertWellFormed(mp4)
+        val a = mp4.audio()
+        val v = mp4.video()
+        val audioEndUs = a.decodeTimes().last() * 1_000_000 / a.timescale
+        val videoEndUs = v.decodeTimes().last() * 1_000_000 / v.timescale
+        assertTrue("audio ends ${audioEndUs - videoEndUs} us from video", Math.abs(audioEndUs - videoEndUs) <= 100_000)
+    }
 }

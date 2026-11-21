@@ -76,4 +76,16 @@ class HeadersTest {
         assertTrue("Chrome/130.0.0.0" in desktop)
         assertEquals(UserAgents.DEFAULT_DESKTOP, UserAgents.desktop(""))
     }
+
+    @Test fun scopeToHostDropsCookieOnHttpsDowngradeAndUnrelatedHosts() {
+        val headers = mapOf("Cookie" to "sid=secret", "Referer" to "https://example.com/", "User-Agent" to "Browser-UA")
+        val withoutCookie = mapOf("Referer" to "https://example.com/", "User-Agent" to "Browser-UA")
+
+        assertEquals(withoutCookie, HeaderCodec.scopeToHost(headers, "https://cdn.example.com/m.m3u8", "http://cdn.example.com/seg.ts"))
+        assertEquals(withoutCookie, HeaderCodec.scopeToHost(headers, "https://example.com/m.m3u8", "http://cdn.example.com/seg.ts"))
+        assertEquals(withoutCookie, HeaderCodec.scopeToHost(headers, "https://example.com/m.m3u8", "https://other.test/seg.ts"))
+
+        assertEquals(headers, HeaderCodec.scopeToHost(headers, "https://example.com/m.m3u8", "https://cdn.example.com/seg.ts"))
+        assertEquals(headers, HeaderCodec.scopeToHost(headers, "http://cdn.example.com/m.m3u8", "http://cdn.example.com/seg.ts"))
+    }
 }

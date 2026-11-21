@@ -61,9 +61,12 @@ object HeaderCodec {
      */
     fun scopeToHost(headers: Map<String, String>, capturedFor: String, url: String): Map<String, String> {
         val cookieName = headers.keys.firstOrNull { it.equals("Cookie", ignoreCase = true) } ?: return headers
-        val from = capturedFor.toHttpUrlOrNull()?.host?.lowercase()
-        val to = url.toHttpUrlOrNull()?.host?.lowercase()
-        val related = from != null && to != null && (from == to || from.endsWith(".$to") || to.endsWith(".$from"))
+        val fromUrl = capturedFor.toHttpUrlOrNull() ?: return headers - cookieName
+        val toUrl = url.toHttpUrlOrNull() ?: return headers - cookieName
+        if (fromUrl.isHttps && !toUrl.isHttps) return headers - cookieName
+        val from = fromUrl.host.lowercase()
+        val to = toUrl.host.lowercase()
+        val related = from == to || from.endsWith(".$to") || to.endsWith(".$from")
         return if (related) headers else headers - cookieName
     }
 

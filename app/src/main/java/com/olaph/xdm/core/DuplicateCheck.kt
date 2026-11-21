@@ -48,14 +48,30 @@ class DuplicateCheck(
     private val fileExists: (location: String) -> Boolean,
     private val folderFor: (fileName: String) -> String? = { null },
 ) {
-    fun find(candidate: DuplicateCandidate, existing: List<DownloadEntity>): DuplicateMatch? {
+    fun find(candidate: DuplicateCandidate, existing: List<DownloadEntity>): DuplicateMatch? =
+        findWith(candidate, existing, fileExists, folderFor)
+
+    fun <T> findAll(items: List<T>, existing: List<DownloadEntity>, candidate: (T) -> DuplicateCandidate): BatchCheck<T> {
+        val existsCache = HashMap<String, Boolean>()
+        val folderCache = HashMap<String, String?>()
+        val cachedExists: (String) -> Boolean = { loc -> existsCache.getOrPut(loc) { fileExists(loc) } }
+        val cachedFolder: (String) -> String? = { name -> folderCache.getOrPut(name) { folderFor(name) } }
+        return BatchCheck(items, items.map { findWith(candidate(it), existing, cachedExists, cachedFolder) })
+    }
+
+    private fun findWith(
+        candidate: DuplicateCandidate,
+        existing: List<DownloadEntity>,
+        exists: (String) -> Boolean,
+        resolveFolder: (String) -> String?,
+    ): DuplicateMatch? {
         if (candidate.isPrivate) return null
         val key = MediaClassifier.normalize(candidate.url.trim())
         val wantedName = candidate.fileName.trim().lowercase()
-        val wantedFolder by lazy { folderFor(candidate.fileName) }
+        val wantedFolder by lazy { resolveFolder(candidate.fileName) }
         return existing.asSequence()
             .filter { !it.isPrivate && it.status != DownloadStatus.CANCELLED }
-            .mapNotNull { e -> reason(candidate, e, key, wantedName) { wantedFolder }?.let { DuplicateMatch(e, it) } }
+            .mapNotNull { e -> reason(candidate, e, key, wantedName, { wantedFolder }, exists)?.let { DuplicateMatch(e, it) } }
             // The closest kind of match first; then an unfinished one (it can be resumed), then the newest.
             .sortedWith(
                 compareBy<DuplicateMatch> { it.reason.ordinal }
@@ -65,21 +81,24 @@ class DuplicateCheck(
             .firstOrNull()
     }
 
-    fun <T> findAll(items: List<T>, existing: List<DownloadEntity>, candidate: (T) -> DuplicateCandidate): BatchCheck<T> =
-        BatchCheck(items, items.map { find(candidate(it), existing) })
-
-    private fun reason(c: DuplicateCandidate, e: DownloadEntity, key: String, wantedName: String, folder: () -> String?): DuplicateReason? {
-        // A finished download whose file is gone is history, not a copy.
-        if (e.status == DownloadStatus.COMPLETED && !hasFile(e)) return null
-        return when {
+    private fun reason(
+        c: DuplicateCandidate,
+        e: DownloadEntity,
+        key: String,
+        wantedName: String,
+        folder: () -> String?,
+        exists: (String) -> Boolean,
+    ): DuplicateReason? {
+        val match = when {
             sameLink(c, e, key) -> DuplicateReason.SAME_LINK
             e.fileName.trim().lowercase() == wantedName && sameFolder(e, folder) -> DuplicateReason.SAME_NAME
             sameSizeAndStem(c, e) -> DuplicateReason.SAME_SIZE
-            else -> null
+            else -> return null
         }
+        // Check filesystem existence only after an in-memory match to avoid unnecessary SAF IPC per row.
+        if (e.status == DownloadStatus.COMPLETED && !(e.savedLocation?.let(exists) ?: false)) return null
+        return match
     }
-
-    private fun hasFile(e: DownloadEntity): Boolean = e.savedLocation?.let(fileExists) ?: false
 
     private fun sameLink(c: DuplicateCandidate, e: DownloadEntity, key: String): Boolean {
         if (MediaClassifier.normalize(e.url.trim()) != key) return false

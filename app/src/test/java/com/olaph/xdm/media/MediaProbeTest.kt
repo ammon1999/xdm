@@ -10,6 +10,7 @@ import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -231,5 +232,41 @@ class MediaProbeTest {
         assertEquals(MediaAnalysis.Rejected, analyze("/x.ts", Kind.SEGMENT))
         assertEquals(MediaAnalysis.Rejected, analyze("/x.js", Kind.IGNORE))
         assertTrue(seen.isEmpty())
+    }
+
+    @Test fun crossHostRedirectDropsCookieButKeepsRefererAndUserAgent() = runBlocking {
+        val cdnSeen = CopyOnWriteArrayList<RecordedRequest>()
+        val cdn = MockWebServer().apply {
+            dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    cdnSeen += request
+                    return MockResponse()
+                        .setHeader("Content-Type", "video/mp4")
+                        .setHeader("Content-Length", "12345")
+                }
+            }
+            start()
+        }
+        try {
+            routes["/start"] = {
+                MockResponse().setResponseCode(302).setHeader("Location", "http://localhost:${cdn.port}/video.mp4")
+            }
+            val headers = mapOf(
+                "Cookie" to "sid=secret",
+                "Referer" to "https://page.test/",
+                "User-Agent" to "Browser-UA",
+            )
+            val result = probe.analyze("http://127.0.0.1:${server.port}/start", Kind.VIDEO_FILE, "default-ua", headers).found()
+            assertEquals(12_345L, result.options.single().sizeBytes)
+            assertEquals("sid=secret", seen.first().getHeader("Cookie"))
+            assertTrue(cdnSeen.isNotEmpty())
+            cdnSeen.forEach { r ->
+                assertNull("cookie must not leak across redirect", r.getHeader("Cookie"))
+                assertEquals("https://page.test/", r.getHeader("Referer"))
+                assertEquals("Browser-UA", r.getHeader("User-Agent"))
+            }
+        } finally {
+            cdn.shutdown()
+        }
     }
 }
